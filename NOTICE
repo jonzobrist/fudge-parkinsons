@@ -1,0 +1,9 @@
+Fuck Parkinson's is independently adapted from Fuck Cancer by Peter Yang.
+Upstream: https://github.com/petergyang/fuck-cancer
+Base commit: ecaef1a3fa5bbee50798942011db508ccdffd5f0
+Adaptation date: 2026-11-14
+
+The original MIT license and copyright notice are retained in LICENSE.
+Changes include Parkinson's-specific care navigation, source guidance, examples,
+agent metadata, trial-search defaults and ranking, candidate-site access labels,
+input validation, and tests. No endorsement or clinical validation is implied.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Find cancer trials with an open site using ClinicalTrials.gov API v2.
+"""Find Parkinson's research studies with candidate sites via ClinicalTrials.gov API v2.
 
 This screens public trial records. It does not determine eligibility or
 recommend treatment. Do not put patient identifiers in search arguments.
@@ -28,12 +28,14 @@ OPEN_STATUSES = (
     "ENROLLING_BY_INVITATION",
 )
 STATUS_NOTES = {
+    "RECRUITING": "Listed as recruiting; confirm current access with the site.",
     "NOT_YET_RECRUITING": (
         "This site is expected to open but cannot screen patients yet."
     ),
     "ENROLLING_BY_INVITATION": (
         "Enrollment is by invitation only; patients cannot volunteer directly."
     ),
+    "UNVERIFIED": "Site status is not listed; overall study status is not site confirmation.",
 }
 PAGE_SIZE = 1000  # API v2 maximum
 MAX_PAGES = 5
@@ -79,25 +81,10 @@ STATE_ALIASES = {
     "qc": "Quebec", "sk": "Saskatchewan",
 }
 QUERY_STOPWORDS = {
-    "a", "and", "cancer", "carcinoma", "for", "in", "neoplasm", "of",
-    "or", "study", "the", "trial", "tumor", "tumour", "with",
+    "a", "and", "disease", "for", "in", "of", "or", "study", "the", "trial", "with",
 }
-TREATMENT_INTERVENTION_TYPES = {
-    "BIOLOGICAL", "COMBINATION_PRODUCT", "DEVICE", "DIETARY_SUPPLEMENT",
-    "DRUG", "GENETIC", "PROCEDURE", "RADIATION",
-}
-SUPPORTIVE_MARKERS = (
-    "behavioral", "e-health", "exercise", "fear of", "interview",
-    "quality of life", "supportive care", "survey",
-)
 DEFAULT_RADIUS_MILES = 50
 EARTH_RADIUS_MILES = 3958.8
-PHASE_PRIORITY = {
-    "PHASE3": 5,
-    "PHASE2": 3,
-    "PHASE1": 1,
-    "EARLY_PHASE1": 1,
-}
 
 
 def clean(value: object) -> str:
@@ -138,31 +125,30 @@ def distance_miles(origin: Tuple[float, float], point: dict) -> Optional[float]:
         lon2 = float(point["lon"])
     except (KeyError, TypeError, ValueError):
         return None
+    if not (-90 <= lat2 <= 90 and -180 <= lon2 <= 180):
+        return None
     lat1, lon1 = map(math.radians, origin)
     lat2, lon2 = math.radians(lat2), math.radians(lon2)
     a = (
         math.sin((lat2 - lat1) / 2) ** 2
         + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
     )
-    return 2 * EARTH_RADIUS_MILES * math.asin(math.sqrt(a))
+    return 2 * EARTH_RADIUS_MILES * math.asin(math.sqrt(min(1.0, max(0.0, a))))
 
 
 def query_tokens(value: object) -> set:
     return {
         token
-        for token in re.findall(r"[a-z0-9]+", clean(value).casefold())
+        for token in re.findall(
+            r"[a-z0-9]+",
+            re.sub(r"\bparkinson(?:['’]s|s)?\b", "parkinson", clean(value).casefold()),
+        )
         if len(token) > 1 and token not in QUERY_STOPWORDS
     }
 
 
-def phase_priority(item: dict) -> int:
-    return max(
-        (PHASE_PRIORITY.get(clean(phase).upper(), 0) for phase in item.get("phases", [])),
-        default=0,
-    )
-
-
 def relevance_score(item: dict, args: argparse.Namespace) -> int:
+    """Text relevance only: study phase and intervention type imply no benefit."""
     title = clean(item.get("title")).casefold()
     interventions = " ".join(item.get("interventions", [])).casefold()
     eligibility = clean(item.get("eligibility_criteria")).casefold()
@@ -176,17 +162,6 @@ def relevance_score(item: dict, args: argparse.Namespace) -> int:
     score += 5 * len(term_tokens & query_tokens(title))
     score += 3 * len(term_tokens & query_tokens(interventions))
     score += 2 * len(term_tokens & query_tokens(eligibility))
-    score += phase_priority(item)
-
-    intervention_types = {
-        clean(value).upper() for value in item.get("intervention_types", [])
-    }
-    if intervention_types & TREATMENT_INTERVENTION_TYPES:
-        score += 4
-    if item.get("overall_status") == "RECRUITING":
-        score += 2
-    if any(marker in f"{title} {interventions}" for marker in SUPPORTIVE_MARKERS):
-        score -= 4
     return score
 
 
@@ -204,7 +179,6 @@ def rank_results(results: List[dict], args: argparse.Namespace) -> List[dict]:
         key=lambda item: (
             -relevance_score(item, args),
             item.get("overall_status") != "RECRUITING",
-            -phase_priority(item),
             -date_ordinal(item.get("last_updated")),
         ),
     )
@@ -218,7 +192,7 @@ def get_json(url: str) -> dict:
         try:
             request = urllib.request.Request(
                 url,
-                headers={"User-Agent": "fuck-cancer-skill/1.0"},
+                headers={"User-Agent": "fuck-parkinsons-skill/1.0"},
             )
             with urllib.request.urlopen(request, timeout=30) as response:
                 return json.load(response)
@@ -325,7 +299,9 @@ def extract(study: dict, args: argparse.Namespace) -> Optional[dict]:
     eligibility = protocol.get("eligibilityModule", {})
     contacts = protocol.get("contactsLocationsModule", {})
 
-    overall_status = clean(status.get("overallStatus"))
+    overall_status = clean(status.get("overallStatus")).upper()
+    if overall_status not in OPEN_STATUSES:
+        return None
     matching_sites = [
         location
         for location in contacts.get("locations", [])
@@ -342,6 +318,9 @@ def extract(study: dict, args: argparse.Namespace) -> Optional[dict]:
             "facility": clean(site.get("facility")),
             "status": clean(site.get("status"))
             or f"not listed (study is {overall_status})",
+            "recruitment_access": (
+                clean(site.get("status")).upper() or "UNVERIFIED"
+            ),
             "city": clean(site.get("city")),
             "state": clean(site.get("state")),
             "country": clean(site.get("country")),
@@ -351,9 +330,9 @@ def extract(study: dict, args: argparse.Namespace) -> Optional[dict]:
             entry["distance_miles"] = round(distance) if distance is not None else None
         return entry
 
-    open_sites = [site_entry(site) for site in matching_sites]
+    candidate_sites = [site_entry(site) for site in matching_sites]
     if near:
-        open_sites.sort(key=lambda site: site["distance_miles"] or 0)
+        candidate_sites.sort(key=lambda site: site["distance_miles"] or 0)
     return {
         "nct_id": nct_id,
         "url": f"https://clinicaltrials.gov/study/{nct_id}",
@@ -382,14 +361,14 @@ def extract(study: dict, args: argparse.Namespace) -> Optional[dict]:
         "eligibility_criteria": preview_criteria(
             eligibility.get("eligibilityCriteria", ""), args.full_criteria
         ),
-        "open_sites": open_sites,
+        "candidate_sites": candidate_sites,
     }
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--condition", required=True, help="Cancer type or condition")
-    parser.add_argument("--terms", default="", help="Stage, biomarker, or treatment terms")
+    parser.add_argument("--condition", default="Parkinson Disease", help="Condition (default: Parkinson Disease)")
+    parser.add_argument("--terms", default="", help="Non-identifying symptom, intervention, or research terms")
     parser.add_argument("--country", required=True)
     parser.add_argument("--state", default="", help="State, province, or region")
     parser.add_argument("--city", default="")
@@ -405,7 +384,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=DEFAULT_RADIUS_MILES,
         help=f"Keep only sites within this many miles of --near (default {DEFAULT_RADIUS_MILES})",
     )
-    parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument("--limit", type=int, default=5)
     parser.add_argument(
         "--full-criteria",
         action="store_true",
@@ -424,8 +403,8 @@ def main() -> int:
     if args.limit < 1:
         print("--limit must be at least 1", file=sys.stderr)
         return 2
-    if args.radius_miles <= 0:
-        print("--radius-miles must be greater than 0", file=sys.stderr)
+    if not math.isfinite(args.radius_miles) or args.radius_miles <= 0:
+        print("--radius-miles must be finite and greater than 0", file=sys.stderr)
         return 2
 
     try:
@@ -448,12 +427,13 @@ def main() -> int:
             "city": args.city,
             "near": list(args.near) if args.near else None,
             "radius_miles": args.radius_miles if args.near else None,
-            "open_site_statuses": list(OPEN_STATUSES),
+            "candidate_site_statuses": list(OPEN_STATUSES),
             "status_notes": STATUS_NOTES,
         },
         "ranking": (
-            "Condition and --terms matches, treatment focus, phase, "
-            "recruitment status, record recency, and API relevance."
+            "Condition and --terms text matches, overall recruitment status, "
+            "record recency, and API relevance. No drug, phase, or study-type preference; "
+            "scores do not establish eligibility, evidence quality, or clinical benefit."
         ),
         "search_truncated": truncated,
         "result_count_before_limit": len(results),
@@ -461,7 +441,9 @@ def main() -> int:
         "warning": (
             "These are screening candidates, not eligibility determinations or "
             "treatment recommendations. Confirm current availability and eligibility "
-            "with the treating oncologist and trial site."
+            "with the treating neurology team and study site. Site status may be "
+            "unverified, not yet recruiting, or invitation-only; candidate_sites "
+            "does not mean all listed sites are enrolling volunteers now."
         ),
     }
     if truncated:
@@ -471,7 +453,7 @@ def main() -> int:
         )
     if not results:
         payload["hint"] = (
-            "No open sites matched. Location matching is exact: use full names such "
+            "No candidate sites matched. Location matching is exact: use full names such "
             "as 'United States' or 'California' (common abbreviations like USA or CA "
             "are expanded automatically), check spelling, or widen the search by "
             "dropping --city or --state, or by using --near LAT,LON with a larger "
