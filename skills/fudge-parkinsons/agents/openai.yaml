@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fudge Parkinson’s"
+  short_description: "Parkinson’s care brief, clear questions and next steps"
+  default_prompt: "Use $fudge-parkinsons to turn these notes into one living Parkinson’s care brief, preserve my prescribed medication schedule, and help prepare questions for my care team."
